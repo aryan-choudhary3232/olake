@@ -53,7 +53,7 @@ jobs:
       OCR_NO_UPDATE: '1'
     steps:
       - name: Review pull request
-        uses: alibaba/open-code-review@55450a95e5999dfd00ec2d582c23d76e269922fb # v1.13.2, keep in sync with ocr_version
+        uses: alibaba/open-code-review@375f64cd6f67a48a135da83cfcf59c52669a09cb # v1.13.2, keep in sync with ocr_version
         with:
           ocr_version: '1.13.2'
           llm_url: ${{ env.DEEP == 'true' && secrets.OCR_LLM_URL_DEEP || secrets.OCR_LLM_URL }}
