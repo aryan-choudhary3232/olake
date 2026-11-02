@@ -1,0 +1,58 @@
+name: Dependabot alerts to Teams
+
+# GitHub Actions has no trigger for Dependabot alerts, so poll the alerts API
+# on a schedule. Posts new vulnerability and malware alerts, alerts closed by
+# auto-triage rules, and alerts that get fixed, dismissed or reopened.
+# Dependabot pull requests are posted by dependabot-prs-teams.yml.
+on:
+  schedule:
+    - cron: "0 * * * *" # every hour
+  workflow_dispatch:
+    inputs:
+      notify_existing:
+        description: "Post all currently open alerts (ignores the sent-alerts cache)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write # save/restore the sent-alerts cache
+
+concurrency:
+  group: dependabot-teams-alerts
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out alert script
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Restore sent-alerts cache
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .dependabot-state
+          key: dependabot-teams-seen-${{ github.run_id }}
+          restore-keys: dependabot-teams-seen-
+
+      - name: Post alert changes to Teams
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_READ_TOKEN }}
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          NOTIFY_EXISTING: ${{ inputs.notify_existing || 'false' }}
+          CACHE_HIT: ${{ steps.restore.outputs.cache-matched-key != '' }}
+          MAX_POSTS: "25"
+        run: .github/scripts/dependabot-alerts-to-teams.sh
+
+      - name: Save sent-alerts cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .dependabot-state
+          key: dependabot-teams-seen-${{ github.run_id }}

@@ -1,0 +1,70 @@
+name: Dependabot PRs to Teams
+
+# Posts Dependabot security update and version update pull requests (single and
+# grouped) to Teams when they open, merge or close.
+#
+# pull_request_target runs the workflow file from the base branch, so this file
+# must exist on master (security updates) and staging (version updates).
+# The job never checks out PR code, so running with secrets is safe.
+on:
+  pull_request_target:
+    types: [opened, reopened, closed]
+
+permissions: {}
+
+jobs:
+  notify:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR to Teams
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          PR: ${{ toJSON(github.event.pull_request) }}
+          ACTION: ${{ github.event.action }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEAMS_WEBHOOK_URL}" ]; then
+            echo "::error::TEAMS_WEBHOOK_URL secret is missing"
+            exit 1
+          fi
+
+          # Security updates always target the default branch. Version updates
+          # target staging (see .github/dependabot.yml).
+          card=$(jq -c --arg action "$ACTION" --arg default "$DEFAULT_BRANCH" --arg repo "$REPO" '
+            (.base.ref == $default) as $security
+            | (.title | test(" group "; "i")) as $grouped
+            | ((if $security then "Security update" else "Version update" end)
+               + (if $grouped then " (grouped)" else "" end)) as $kind
+            | (if $action == "closed" then (if .merged then "merged" else "closed without merge" end)
+               elif $action == "reopened" then "reopened" else "opened" end) as $event
+            | {
+                type: "message",
+                attachments: [{
+                  contentType: "application/vnd.microsoft.card.adaptive",
+                  contentUrl: null,
+                  content: {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    type: "AdaptiveCard", version: "1.4",
+                    body: [
+                      {type: "TextBlock", size: "Medium", weight: "Bolder", wrap: true,
+                       color: (if $event == "merged" then "Good" elif $security and $event == "opened" then "Attention" else "Default" end),
+                       text: ("Dependabot " + $kind + " PR #" + (.number | tostring) + " " + $event)},
+                      {type: "TextBlock", wrap: true, text: .title},
+                      {type: "FactSet", facts: [
+                        {title: "Repository", value: $repo},
+                        {title: "Type", value: $kind},
+                        {title: "Base", value: .base.ref},
+                        {title: "Branch", value: .head.ref},
+                        {title: "Labels", value: ([.labels[].name] | join(", ") | if . == "" then "none" else . end)}
+                      ]}
+                    ],
+                    actions: [{type: "Action.OpenUrl", title: "Open PR", url: .html_url}]
+                  }
+                }]
+              }' <<< "$PR")
+
+          curl -sS --fail-with-body -X POST -H "Content-Type: application/json" \
+            -d "$card" "$TEAMS_WEBHOOK_URL"
