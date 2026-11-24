@@ -21,3 +21,6 @@ tests/*/testdata/**/logs
 CLAUDE.local.md
 
 coverage.out
+
+# Release binaries (make dist.<driver>)
+/dist/

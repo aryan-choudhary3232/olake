@@ -68,5 +68,10 @@ endif
 # survive SIP (see prepare.db2's install-name fix, which makes it unnecessary).
 GO_ENV.db2 = export CGO_ENABLED=1 IBM_DB_HOME="$(CLIDRIVER_DIR)" CGO_CFLAGS="-I$(CLIDRIVER_DIR)/include" CGO_LDFLAGS="-L$(CLIDRIVER_DIR)/lib -Wl,-rpath,$(CLIDRIVER_RUNTIME_DIR)/lib" LD_LIBRARY_PATH="$(CLIDRIVER_DIR)/lib";
 
-# cgo against IBM's x86-64 clidriver can't cross-compile, so db2's image compiles on its target platform.
+# cgo against IBM's x86-64 clidriver can't cross-compile, so db2's image compiles on its target
+# platform, and dist.db2 (the release build) only builds for the host it runs on.
 DOCKER_BUILD_ARGS.db2 := --build-arg GO_BUILD=target
+NATIVE_DIST.db2 := 1
+
+# libdb2 lists libxml2.so.2 as NEEDED; libpam and libcrypt are already in the runtime base image.
+RUNTIME_PACKAGES.db2 := libxml2

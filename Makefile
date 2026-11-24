@@ -17,13 +17,13 @@ parse_platforms_conf = $(shell awk -F' *= *' -v d=$(1) -v use_def=$(2) '/^[[:spa
 driver_platforms = $(or $(PLATFORMS),$(call parse_platforms_conf,$(1),1))
 local_driver_platforms = $(or $(PLATFORMS),$(call parse_platforms_conf,$(1)))
 
-# Queried by release-tool.sh; PLATFORMS env/arg forces the list.
+# Queried by the release workflow; PLATFORMS env/arg forces the list.
 print.platforms.%:
 	@echo $(call driver_platforms,$*)
 
-# Queried by release-tool.sh, so releases get the same per-driver flags as docker.<d>.build.
-print.docker-build-args.%:
-	@echo $(DOCKER_BUILD_ARGS.$*)
+# Queried by the Dockerfile (and written by dist.<d>): apt packages only this driver's image needs.
+print.runtime-packages.%:
+	@echo $(RUNTIME_PACKAGES.$*)
 
 .PHONY: gomod golangci.install trivy gofmt pre-commit
 
@@ -189,7 +189,11 @@ wait_ready = echo "Waiting for $(1) (up to $(or $(WAIT_RETRIES.$(1)),$(WAIT_RETR
 #                                      into every go command that compiles <d> (must
 #                                      be shell `export`s so the env survives SIP and
 #                                      reaches all commands of a pipeline)
-#   DOCKER_BUILD_ARGS.<d>              extra `docker build` flags for its image (docker.<d>.build, release-tool.sh)
+#   DOCKER_BUILD_ARGS.<d>              extra `docker build` flags for its image (docker.<d>.build)
+#   NATIVE_DIST.<d>                    set when <d> cannot be cross-compiled (cgo against host
+#                                      libraries): dist.<d> then only builds for the host platform
+#   RUNTIME_PACKAGES.<d>               extra apt packages its image needs at runtime (db2: libxml2),
+#                                      so every other image stays without them
 #   NON_CDC_DRIVERS += <d>             opt out of the 2PC suites
 # plus driver-only targets. Recipes run from the repo root. Fragments are
 # included before the driver lists below are derived and before the templates
@@ -351,13 +355,49 @@ $(addsuffix .build,$(addprefix docker.,$(DRIVERS))): $(ICEBERG_JAR)
 # and GO_ENV.db2 turns it back on right after (it is appended to this same recipe line). Without
 # the explicit default, a db2 build -- or a cancelled one -- leaves CGO_ENABLED=1 in the caller's
 # shell and the next driver silently links against libc.
+#
+# GO_BUILD_FLAGS adds go build flags (image builds pass RELEASE_GO_BUILD_FLAGS) and GO_OUT writes
+# the binary somewhere other than drivers/<d>/olake (an absolute path; dist.<d> uses it).
+GO_BUILD_FLAGS ?=
+GO_OUT ?=
+# Release binaries: no local paths baked in, no symbol table or DWARF (panics still print full
+# stack traces).
+RELEASE_GO_BUILD_FLAGS := -trimpath -ldflags="-s -w"
 define DEV_BUILD_template
 .PHONY: dev.$(1).build
 dev.$(1).build: prepare.$(1)
-	export CGO_ENABLED=0; $$(GO_ENV.$(1)) cd drivers/$(1) && go build -o olake main.go
-	@echo "Built drivers/$(1)/olake"
+	export CGO_ENABLED=0; $$(GO_ENV.$(1)) cd drivers/$(1) && go build $$(GO_BUILD_FLAGS) -o "$$(or $$(GO_OUT),olake)" main.go
+	@echo "Built $$(or $$(GO_OUT),drivers/$(1)/olake)"
 endef
 $(foreach d,$(DRIVERS),$(eval $(call DEV_BUILD_template,$(d))))
+
+# --- release binaries ---------------------------------------------------------
+# dist.<driver> builds the driver for each of its platforms (drivers/platforms.conf, or
+# PLATFORMS=...) into dist/<driver>/<os>/<arch>/: the `olake` binary, overlay/ with the runtime
+# files prepare.<driver> stages for the image (empty except db2's clidriver) and runtime-packages,
+# its RUNTIME_PACKAGES list (empty except db2). The release workflow runs it on the runner and
+# builds the image with BINARIES=dist, so the image build only copies files and never compiles Go
+# under emulation. dist/<driver> is emptied first, so a binary from an older build can never end
+# up in an image.
+comma := ,
+dist.%:
+	@test -n "$(filter $*,$(DRIVERS))" || { echo "dist.$*: unknown driver; one of: $(DRIVERS)" >&2; exit 1; }
+	@platforms='$(subst $(comma), ,$(call driver_platforms,$*))'; \
+	test -n "$$platforms" || { echo "dist.$*: no platforms to build for" >&2; exit 1; }; \
+	host="$$(go env GOHOSTOS)/$$(go env GOHOSTARCH)"; \
+	for p in $$platforms; do \
+		case "$$p" in */*/*|/*|*/|*/*/) echo "dist.$*: $$p: only <os>/<arch> platforms are supported" >&2; exit 1;; \
+			*/*) ;; *) echo "dist.$*: $$p: only <os>/<arch> platforms are supported" >&2; exit 1;; esac; \
+		$(if $(NATIVE_DIST.$*),[ "$$p" = "$$host" ] || { echo "dist.$*: $* cannot be cross-compiled; $$p needs a $$p host (this one is $$host)" >&2; exit 1; };) \
+	done; \
+	rm -rf "$(CURDIR)/dist/$*"; \
+	for p in $$platforms; do \
+		out="$(CURDIR)/dist/$*/$$p"; \
+		echo "go build $* for $$p"; \
+		GOOS="$${p%/*}" GOARCH="$${p#*/}" $(MAKE) --no-print-directory dev.$*.build \
+			OVERLAY_DIR="$$out/overlay" GO_OUT="$$out/olake" GO_BUILD_FLAGS='$(RELEASE_GO_BUILD_FLAGS)' || exit 1; \
+		echo '$(RUNTIME_PACKAGES.$*)' > "$$out/runtime-packages" || exit 1; \
+	done
 
 # --- tests --------------------------------------------------------------------
 # Everything one driver's suites need, brought up concurrently. A recursive -j sub-make, since plain
@@ -474,6 +514,7 @@ help:
 	@echo ""
 	@echo "Dev builds:"
 	@$(foreach d,$(DRIVERS),printf "  %-44s %s\n" "dev.$(d).build" "host binary at drivers/$(d)/olake";)
+	@printf "  %-44s %s\n" "dist.<driver>" "release binaries in dist/<driver>/<os>/<arch>/ for its platforms (PLATFORMS=...)"
 	@printf "  %-44s %s\n" "prepare.<driver> | prepare.all" "provision host build deps (db2: IBM clidriver; else no-op)"
 	@echo ""
 	@echo "Docker images:"

@@ -21,23 +21,87 @@ on:
         type: string
         default: ""
 
+permissions:
+  contents: read
+
+env:
+  DRIVER: ${{ inputs.driver || github.event.inputs.driver || 'mongodb' }}
+  VERSION: ${{ inputs.version || github.event.inputs.version || 'v0.0.0.dev' }}
+
 jobs:
-  publish_drivers:
-    name: Publish driver ${{ github.event.inputs.driver }} [manual]
-    environment: Publish Driver
+  # Builds the driver binaries for every platform (`make dist.<driver>`) and the Iceberg writer
+  # jar on the runner. No Docker Hub credentials here: the build runs third-party code (Go
+  # modules, Maven plugins).
+  build:
+    name: Build ${{ inputs.driver }} binaries
     runs-on: 32gb-runner
-    env:
-      DOCKER_LOGIN: ${{ secrets.DOCKER_USERNAME }}
-      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-      DHID: ${{ secrets.DOCKER_REPO || 'olakego' }}
-      DRIVER: ${{ inputs.driver || github.event.inputs.driver || 'mongodb' }}
-      VERSION: ${{ inputs.version || github.event.inputs.version || 'v0.0.0.dev' }}
+    timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.ref.outputs.sha }}
+      platforms: ${{ steps.plan.outputs.platforms }}
+      version-tag: ${{ steps.plan.outputs.version-tag }}
+      latest-tag: ${{ steps.plan.outputs.latest-tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      # The push jobs check out this exact commit, so the image always matches the binaries.
+      - name: Record commit
+        id: ref
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Go version pinned in go.mod. No Go caches: a release build should not restore state
+      # other workflows saved.
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # Fail before anything is built if the driver or version is not releasable.
+      #   master, or a release tag:  v1.2.3      -> v1.2.3, latest (semver checked on master)
+      #   staging:                   v1.2.3-rc1  -> stag-v1.2.3-rc1, stag-latest
+      #   any other branch:          any tag     -> dev-<version>, dev-latest
+      - name: Resolve driver, platforms and tags
+        id: plan
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          drivers=" $(make -s print.drivers) "
+          [[ "$drivers" == *" $DRIVER "* ]] \
+            || { echo "::error::Unknown driver '$DRIVER'; one of:$drivers"; exit 1; }
+
+          # Each platform gets a runner of its own arch below, so only these two are buildable.
+          platforms=$(make -s "print.platforms.$DRIVER")
+          for p in ${platforms//,/ }; do
+            [[ "$p" == linux/amd64 || "$p" == linux/arm64 ]] \
+              || { echo "::error::No runner for platform '$p' of $DRIVER"; exit 1; }
+          done
+          echo "platforms=$(jq -cn --arg p "$platforms" '$p | split(",")')" >> "$GITHUB_OUTPUT"
+
+          [[ "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,119}$ ]] \
+            || { echo "::error::Version '$VERSION' is not a valid Docker tag"; exit 1; }
+          branch=""
+          [[ "$REF_TYPE" == branch ]] && branch="$REF_NAME"
+          case "$branch" in
+            master|"")
+              [[ "$branch" != master || "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+                || { echo "::error::Version '$VERSION' must be semantic (e.g. v1.0.0) for master"; exit 1; }
+              version_tag="$VERSION"; latest_tag="latest" ;;
+            staging)
+              [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_.-]+$ ]] \
+                || { echo "::error::Version '$VERSION' must look like v1.0.0-rc1 for staging"; exit 1; }
+              version_tag="stag-$VERSION"; latest_tag="stag-latest" ;;
+            *)
+              version_tag="dev-$VERSION"; latest_tag="dev-latest" ;;
+          esac
+          echo "version-tag=$version_tag" >> "$GITHUB_OUTPUT"
+          echo "latest-tag=$latest_tag" >> "$GITHUB_OUTPUT"
+          echo "Releasing $DRIVER $VERSION for $platforms as $version_tag, $latest_tag"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -46,14 +110,156 @@ jobs:
           distribution: "temurin"
           cache: maven
 
-      - name: Set Driver
-        run: echo "DRIVER=${{ env.DRIVER }}" >> $GITHUB_ENV
-      - name: Set VERSION
-        run: echo "VERSION=${{ env.VERSION }}" >> $GITHUB_ENV
-      - name: Show VERSION
-        run: echo "Building driver $DRIVER with version $VERSION"
-      - name: Run Release tool
+      - name: Build binaries and the Iceberg writer jar
+        run: make -j2 --output-sync=target iceberg.jar "dist.$DRIVER"
+
+      # A tarball keeps the exec bits and the clidriver's symlinks, which an artifact drops.
+      - name: Package build output
         run: |
-          chmod +x ./release-tool.sh
-          ./release-tool.sh
-        shell: bash
+          tar -cf "$RUNNER_TEMP/release.tar" "dist/$DRIVER" \
+            destination/iceberg/olake-iceberg-java-writer/target/olake-iceberg-java-writer-0.0.1-SNAPSHOT.jar
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ env.DRIVER }}
+          path: ${{ runner.temp }}/release.tar
+          if-no-files-found: error
+          retention-days: 1
+          # A re-run of this job uploads under the same name.
+          overwrite: true
+
+  # Packages the prebuilt files into one image per platform, each on a runner of that arch, so
+  # nothing runs under QEMU. Smoke tests the image, then pushes it by digest; `merge` tags them.
+  push:
+    name: Push ${{ inputs.driver }} image (${{ matrix.platform }})
+    needs: build
+    environment: Publish Driver
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        platform: ${{ fromJSON(needs.build.outputs.platforms) }}
+    env:
+      IMAGE: ${{ secrets.DOCKER_REPO || 'olakego' }}/source-${{ inputs.driver || github.event.inputs.driver || 'mongodb' }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      # The image build only reads these from the repo; the rest comes from the build job.
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.build.outputs.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            /Dockerfile
+            /.dockerignore
+            /drivers/*/resources/spec.json
+            /destination/*/resources/spec.json
+          sparse-checkout-cone-mode: false
+
+      - name: Download build output
+        uses: actions/download-artifact@v8
+        with:
+          name: release-${{ env.DRIVER }}
+          path: ${{ runner.temp }}
+
+      - name: Unpack build output
+        run: tar -xf "$RUNNER_TEMP/release.tar"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: |
+          docker buildx build --platform "$PLATFORM" --load -t olake-smoke:local \
+            --build-arg BINARIES=dist \
+            --build-arg DRIVER_NAME="$DRIVER" \
+            --build-arg DRIVER_VERSION="$VERSION" .
+
+      # Runs the image as shipped: the binary loads (db2: links against the bundled clidriver), it
+      # finds its specs, and the JVM and ss the Iceberg writer needs are there.
+      - name: Smoke test image
+        run: |
+          set -euo pipefail
+          run() { docker run --rm -e TELEMETRY_DISABLED=true "$@"; }
+          run olake-smoke:local spec > /dev/null
+          run olake-smoke:local spec --destination-type iceberg > /dev/null
+          run olake-smoke:local spec --destination-type parquet > /dev/null
+          run --entrypoint java olake-smoke:local -version
+          run --entrypoint ss olake-smoke:local -V
+          if run --entrypoint ldd olake-smoke:local /home/olake 2>&1 | grep 'not found'; then
+            echo "::error::/home/olake has unresolved libraries"; exit 1
+          fi
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Same inputs as the tested build, so the builder's cache makes this the same image.
+      - name: Push image by digest
+        run: |
+          set -euo pipefail
+          docker buildx build --platform "$PLATFORM" \
+            --build-arg BINARIES=dist \
+            --build-arg DRIVER_NAME="$DRIVER" \
+            --build-arg DRIVER_VERSION="$VERSION" \
+            --output "type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true" \
+            --metadata-file "$RUNNER_TEMP/metadata.json" .
+          digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/metadata.json")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::No digest in the build metadata"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+          echo "PLATFORM_SLUG=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ env.DRIVER }}-${{ env.PLATFORM_SLUG }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  # Publishes one multi-arch tag pair over the per-platform images.
+  merge:
+    name: Publish ${{ inputs.driver }} image
+    needs: [build, push]
+    environment: Publish Driver
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      IMAGE: ${{ secrets.DOCKER_REPO || 'olakego' }}/source-${{ inputs.driver || github.event.inputs.driver || 'mongodb' }}
+      VERSION_TAG: ${{ needs.build.outputs.version-tag }}
+      LATEST_TAG: ${{ needs.build.outputs.latest-tag }}
+      PLATFORMS: ${{ needs.build.outputs.platforms }}
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: digests-${{ env.DRIVER }}-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Create and push the multi-arch tags
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          refs=()
+          for d in *; do refs+=("$IMAGE@sha256:$d"); done
+          want=$(jq length <<< "$PLATFORMS")
+          [[ ${#refs[@]} -eq $want ]] \
+            || { echo "::error::Expected $want platform images, found ${#refs[@]}"; exit 1; }
+          echo "Publishing $IMAGE:{$VERSION_TAG,$LATEST_TAG} over ${refs[*]}"
+          docker buildx imagetools create -t "$IMAGE:$VERSION_TAG" -t "$IMAGE:$LATEST_TAG" "${refs[@]}"
+          docker buildx imagetools inspect "$IMAGE:$VERSION_TAG"
