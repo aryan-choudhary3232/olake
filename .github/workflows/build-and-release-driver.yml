@@ -145,6 +145,8 @@ jobs:
     env:
       IMAGE: ${{ secrets.DOCKER_REPO || 'olakego' }}/source-${{ inputs.driver || github.event.inputs.driver || 'mongodb' }}
       PLATFORM: ${{ matrix.platform }}
+      # Keeps the build summary but not its .dockerbuild record artifact (two per job otherwise).
+      DOCKER_BUILD_RECORD_UPLOAD: false
     steps:
       # The image build only reads these from the repo; the rest comes from the build job.
       - name: Checkout code
@@ -171,12 +173,19 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # context: . builds the checkout plus the unpacked dist/ and jar; the action's default (the
+      # Git context) would fetch the repo again and miss them.
       - name: Build image
-        run: |
-          docker buildx build --platform "$PLATFORM" --load -t olake-smoke:local \
-            --build-arg BINARIES=dist \
-            --build-arg DRIVER_NAME="$DRIVER" \
-            --build-arg DRIVER_VERSION="$VERSION" .
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ env.PLATFORM }}
+          build-args: &build-args |
+            BINARIES=dist
+            DRIVER_NAME=${{ env.DRIVER }}
+            DRIVER_VERSION=${{ env.VERSION }}
+          load: true
+          tags: olake-smoke:local
 
       # Runs the image as shipped: the binary loads (db2: links against the bundled clidriver), it
       # finds its specs, and the JVM and ss the Iceberg writer needs are there.
@@ -201,18 +210,22 @@ jobs:
 
       # Same inputs as the tested build, so the builder's cache makes this the same image.
       - name: Push image by digest
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ env.PLATFORM }}
+          build-args: *build-args
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -euo pipefail
-          docker buildx build --platform "$PLATFORM" \
-            --build-arg BINARIES=dist \
-            --build-arg DRIVER_NAME="$DRIVER" \
-            --build-arg DRIVER_VERSION="$VERSION" \
-            --output "type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true" \
-            --metadata-file "$RUNNER_TEMP/metadata.json" .
-          digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/metadata.json")
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::No digest in the build metadata"; exit 1; }
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::No digest from the push"; exit 1; }
           mkdir -p "$RUNNER_TEMP/digests"
-          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
           echo "PLATFORM_SLUG=${PLATFORM//\//-}" >> "$GITHUB_ENV"
 
       - name: Upload digest
