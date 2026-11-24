@@ -1,5 +1,7 @@
 name: Olake Driver Build And Release
 on:
+  push:
+    branches: [test/fast-driver-image]
   workflow_dispatch:
     inputs:
       driver:
