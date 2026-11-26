@@ -212,7 +212,7 @@ jobs:
     strategy:
       matrix:
         baseline: ${{ fromJSON(github.event_name == 'pull_request' && format('["{0}"]', github.event.pull_request.base.sha) || '[]') }}
-    runs-on: 32gb-runner
+    runs-on: ubuntu-latest
     environment: ${{ needs.approve.outputs.attempt != github.run_attempt && !(github.head_ref == 'staging' && github.base_ref == 'master') && 'integration_tests' || '' }}
     timeout-minutes: 90
     env:
