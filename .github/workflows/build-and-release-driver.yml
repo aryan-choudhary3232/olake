@@ -52,8 +52,8 @@ jobs:
         id: ref
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # Go version pinned in go.mod. No Go caches: a release build should not restore state
-      # other workflows saved.
+      # Go version pinned in go.mod. No Go or Maven caches: a release build should not restore
+      # state other workflows saved.
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -61,7 +61,7 @@ jobs:
           cache: false
 
       # Fail before anything is built if the driver or version is not releasable.
-      #   master, or a release tag:  v1.2.3      -> v1.2.3, latest (semver checked on master)
+      #   master, or a release tag:  v1.2.3      -> v1.2.3, latest
       #   staging:                   v1.2.3-rc1  -> stag-v1.2.3-rc1, stag-latest
       #   any other branch:          any tag     -> dev-<version>, dev-latest
       - name: Resolve driver, platforms and tags
@@ -89,8 +89,8 @@ jobs:
           [[ "$REF_TYPE" == branch ]] && branch="$REF_NAME"
           case "$branch" in
             master|"")
-              [[ "$branch" != master || "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-                || { echo "::error::Version '$VERSION' must be semantic (e.g. v1.0.0) for master"; exit 1; }
+              [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+                || { echo "::error::Version '$VERSION' must be semantic (e.g. v1.0.0) for master or a release tag"; exit 1; }
               version_tag="$VERSION"; latest_tag="latest" ;;
             staging)
               [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[a-zA-Z0-9_.-]+$ ]] \
@@ -108,7 +108,6 @@ jobs:
         with:
           java-version: "17"
           distribution: "temurin"
-          cache: maven
 
       - name: Build binaries and the Iceberg writer jar
         run: make -j2 --output-sync=target iceberg.jar "dist.$DRIVER"
