@@ -14,23 +14,17 @@ To ensure consistency, we follow a structured contribution process. All guidelin
 
 ## Building release images
 
-`make docker.<driver>.build` builds the image the default way (`BINARIES=source`): Go compiles inside Docker. Local builds and the test suites use this path.
-
-Releases build the binaries on the host first and the image only copies them in (`BINARIES=dist`). The release workflow (`.github/workflows/build-and-release-driver.yml`) does this; to build the same image locally:
+Every image build compiles the driver inside Docker: `make docker.<driver>.build` (local builds, the test suites) and the release workflow (`.github/workflows/build-and-release-driver.yml`), which builds each platform on a runner of that architecture so nothing runs under QEMU. To build a release image by hand:
 
 ```bash
-# 1. The driver binaries for its platforms (drivers/platforms.conf, or PLATFORMS=...) and the Iceberg writer jar
-make iceberg.jar dist.<driver> PLATFORMS=linux/amd64
-
-# 2. The image, copying dist/<driver>/<os>/<arch>/ instead of compiling
+make iceberg.jar
 docker buildx build --platform linux/amd64 \
-  --build-arg BINARIES=dist \
   --build-arg DRIVER_NAME=<driver> \
   --build-arg DRIVER_VERSION=<version> \
   --load -t olakego/source-<driver>:<version> .
 ```
 
-`dist.<driver>` writes `dist/<driver>/<os>/<arch>/` with the `olake` binary, the driver's runtime files (`overlay/`) and its extra runtime packages (`runtime-packages`). Every driver cross-compiles except `db2`, which uses cgo: build it on a Linux host of the target platform.
+`db2` uses cgo against IBM's x86-64 clidriver: build it for `linux/amd64` only.
 
 ---
 

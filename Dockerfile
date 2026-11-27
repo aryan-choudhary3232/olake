@@ -1,9 +1,6 @@
 ARG GO_BUILD=cross
-# Where the driver binary comes from:
-#   source  compiled in this build: local builds, the test suites, images of any commit
-#   dist    copied from dist/<driver>/<os>/<arch>/, built on the host by `make dist.<driver>`:
-#           the release workflow, so a release image build only copies files
-ARG BINARIES=source
+# CASE 1: the driver binary is always compiled inside this build (release workflow,
+# `make docker.<driver>.build`, the test suites).
 
 FROM --platform=$BUILDPLATFORM golang:1.26.11-bookworm AS go-cross
 FROM golang:1.26.11-bookworm AS go-target
@@ -13,8 +10,8 @@ WORKDIR /home/app
 COPY . .
 RUN mkdir /out && cp --parents Makefile $(find drivers -maxdepth 2 -name driver.mk) /out
 
-# Build Stage. Leaves the same layout dist.<driver> does: /dist/olake and /dist/overlay/.
-FROM go-${GO_BUILD} AS build-source
+# Build Stage. Leaves /dist/olake, /dist/overlay/ and /dist/runtime-packages.
+FROM go-${GO_BUILD} AS binaries
 
 WORKDIR /home/app
 
@@ -35,16 +32,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     GOARCH=${TARGETARCH} make dev.${DRIVER_NAME}.build OVERLAY_DIR=/dist/overlay \
     GO_OUT=/dist/olake GO_BUILD_FLAGS='$(RELEASE_GO_BUILD_FLAGS)'
-
-# Prebuilt by `make dist.<driver>`; overlay/ and runtime-packages are always there, empty for
-# every driver but db2.
-FROM scratch AS build-dist
-ARG DRIVER_NAME=olake
-ARG TARGETOS
-ARG TARGETARCH
-COPY dist/${DRIVER_NAME}/${TARGETOS}/${TARGETARCH}/ /dist/
-
-FROM build-${BINARIES} AS binaries
 
 FROM eclipse-temurin:17-jre-noble AS runtime-base
 
@@ -90,7 +77,7 @@ RUN --mount=type=bind,from=binaries,source=/dist/runtime-packages,target=/tmp/ru
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
-# The driver binary, from whichever stage BINARIES picked
+# The driver binary, from the build stage
 COPY --from=binaries --chmod=0755 /dist/olake /home/olake
 
 # Sets the version of olake in ENV

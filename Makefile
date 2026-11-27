@@ -21,7 +21,7 @@ local_driver_platforms = $(or $(PLATFORMS),$(call parse_platforms_conf,$(1)))
 print.platforms.%:
 	@echo $(call driver_platforms,$*)
 
-# Queried by the Dockerfile (and written by dist.<d>): apt packages only this driver's image needs.
+# Queried by the Dockerfile: apt packages only this driver's image needs.
 print.runtime-packages.%:
 	@echo $(RUNTIME_PACKAGES.$*)
 
@@ -190,8 +190,6 @@ wait_ready = echo "Waiting for $(1) (up to $(or $(WAIT_RETRIES.$(1)),$(WAIT_RETR
 #                                      be shell `export`s so the env survives SIP and
 #                                      reaches all commands of a pipeline)
 #   DOCKER_BUILD_ARGS.<d>              extra `docker build` flags for its image (docker.<d>.build)
-#   NATIVE_DIST.<d>                    set when <d> cannot be cross-compiled (cgo against host
-#                                      libraries): dist.<d> then only builds for the host platform
 #   RUNTIME_PACKAGES.<d>               extra apt packages its image needs at runtime (db2: libxml2),
 #                                      so every other image stays without them
 #   NON_CDC_DRIVERS += <d>             opt out of the 2PC suites
@@ -357,7 +355,7 @@ $(addsuffix .build,$(addprefix docker.,$(DRIVERS))): $(ICEBERG_JAR)
 # shell and the next driver silently links against libc.
 #
 # GO_BUILD_FLAGS adds go build flags (image builds pass RELEASE_GO_BUILD_FLAGS) and GO_OUT writes
-# the binary somewhere other than drivers/<d>/olake (an absolute path; dist.<d> uses it).
+# the binary somewhere other than drivers/<d>/olake (an absolute path; the image build uses it).
 GO_BUILD_FLAGS ?=
 GO_OUT ?=
 # Release binaries: no local paths baked in, no symbol table or DWARF (panics still print full
@@ -370,34 +368,6 @@ dev.$(1).build: prepare.$(1)
 	@echo "Built $$(or $$(GO_OUT),drivers/$(1)/olake)"
 endef
 $(foreach d,$(DRIVERS),$(eval $(call DEV_BUILD_template,$(d))))
-
-# --- release binaries ---------------------------------------------------------
-# dist.<driver> builds the driver for each of its platforms (drivers/platforms.conf, or
-# PLATFORMS=...) into dist/<driver>/<os>/<arch>/: the `olake` binary, overlay/ with the runtime
-# files prepare.<driver> stages for the image (empty except db2's clidriver) and runtime-packages,
-# its RUNTIME_PACKAGES list (empty except db2). The release workflow runs it on the runner and
-# builds the image with BINARIES=dist, so the image build only copies files and never compiles Go
-# under emulation. dist/<driver> is emptied first, so a binary from an older build can never end
-# up in an image.
-comma := ,
-dist.%:
-	@test -n "$(filter $*,$(DRIVERS))" || { echo "dist.$*: unknown driver; one of: $(DRIVERS)" >&2; exit 1; }
-	@platforms='$(subst $(comma), ,$(call driver_platforms,$*))'; \
-	test -n "$$platforms" || { echo "dist.$*: no platforms to build for" >&2; exit 1; }; \
-	host="$$(go env GOHOSTOS)/$$(go env GOHOSTARCH)"; \
-	for p in $$platforms; do \
-		case "$$p" in */*/*|/*|*/|*/*/) echo "dist.$*: $$p: only <os>/<arch> platforms are supported" >&2; exit 1;; \
-			*/*) ;; *) echo "dist.$*: $$p: only <os>/<arch> platforms are supported" >&2; exit 1;; esac; \
-		$(if $(NATIVE_DIST.$*),[ "$$p" = "$$host" ] || { echo "dist.$*: $* cannot be cross-compiled; $$p needs a $$p host (this one is $$host)" >&2; exit 1; };) \
-	done; \
-	rm -rf "$(CURDIR)/dist/$*"; \
-	for p in $$platforms; do \
-		out="$(CURDIR)/dist/$*/$$p"; \
-		echo "go build $* for $$p"; \
-		GOOS="$${p%/*}" GOARCH="$${p#*/}" $(MAKE) --no-print-directory dev.$*.build \
-			OVERLAY_DIR="$$out/overlay" GO_OUT="$$out/olake" GO_BUILD_FLAGS='$(RELEASE_GO_BUILD_FLAGS)' || exit 1; \
-		echo '$(RUNTIME_PACKAGES.$*)' > "$$out/runtime-packages" || exit 1; \
-	done
 
 # --- tests --------------------------------------------------------------------
 # Everything one driver's suites need, brought up concurrently. A recursive -j sub-make, since plain
@@ -514,7 +484,6 @@ help:
 	@echo ""
 	@echo "Dev builds:"
 	@$(foreach d,$(DRIVERS),printf "  %-44s %s\n" "dev.$(d).build" "host binary at drivers/$(d)/olake";)
-	@printf "  %-44s %s\n" "dist.<driver>" "release binaries in dist/<driver>/<os>/<arch>/ for its platforms (PLATFORMS=...)"
 	@printf "  %-44s %s\n" "prepare.<driver> | prepare.all" "provision host build deps (db2: IBM clidriver; else no-op)"
 	@echo ""
 	@echo "Docker images:"
