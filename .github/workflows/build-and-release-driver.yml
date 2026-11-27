@@ -34,7 +34,7 @@ jobs:
   # modules, Maven plugins).
   build:
     name: Build ${{ inputs.driver }} binaries
-    runs-on: 32gb-runner
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
       sha: ${{ steps.ref.outputs.sha }}
