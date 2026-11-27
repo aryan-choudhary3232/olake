@@ -111,13 +111,7 @@ jobs:
         name: Restore Iceberg writer jar
         uses: ./.github/actions/iceberg-jar
 
-      - &driver-image
-        name: Build driver image
-        id: image
-        background: true
-        timeout-minutes: 20
-        run: make docker.${{ matrix.driver }}.build DOCKER_BUILD="docker buildx build --progress=plain --cache-from type=gha,scope=olake-base --cache-from type=gha,scope=olake-${{ matrix.driver }} --load"
-
+      # CASE 2 (dist): Go must be set up first, since the binary is compiled on the runner.
       - &go
         name: Set up Go
         uses: actions/setup-go@v4
@@ -128,6 +122,24 @@ jobs:
       - &go-caches
         name: Restore shared Go caches
         uses: ./.github/actions/go-caches
+
+      # CASE 2 (dist): the same path as the release workflow -- `make dist.<driver>` builds the binary
+      # on the runner and the image only copies it in (BINARIES=dist).
+      - &driver-image
+        name: Build driver image
+        id: image
+        background: true
+        timeout-minutes: 20
+        env:
+          DRIVER: ${{ matrix.driver }}
+        run: |
+          set -euo pipefail
+          make "dist.$DRIVER" PLATFORMS=linux/amd64
+          docker buildx build --progress=plain \
+            --cache-from type=gha,scope=olake-base --cache-from "type=gha,scope=olake-$DRIVER" \
+            --platform linux/amd64 \
+            --build-arg BINARIES=dist --build-arg DRIVER_NAME="$DRIVER" \
+            --load -t "olakego/source-$DRIVER:local" .
 
       - &test-build
         name: Install Dependencies
@@ -302,9 +314,9 @@ jobs:
       - *containers
       - *buildx
       - *jar
-      - *driver-image
       - *go
       - *go-caches
+      - *driver-image
       - *test-build
       - *wait-background
       - *wait-ready
