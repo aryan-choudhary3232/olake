@@ -34,7 +34,7 @@ jobs:
   # modules, Maven plugins).
   build:
     name: Build ${{ inputs.driver }} binaries
-    runs-on: 32gb-runner
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
       sha: ${{ steps.ref.outputs.sha }}
@@ -178,7 +178,6 @@ jobs:
           context: .
           platforms: ${{ env.PLATFORM }}
           build-args: &build-args |
-            BINARIES=dist
             DRIVER_NAME=${{ env.DRIVER }}
             DRIVER_VERSION=${{ env.VERSION }}
           load: true

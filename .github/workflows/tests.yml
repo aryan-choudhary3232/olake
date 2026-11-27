@@ -69,7 +69,7 @@ jobs:
     name: Integration Test ${{ matrix.name }}
     needs: approve
     if: github.event_name == 'pull_request'
-    runs-on: 16gb-runner
+    runs-on: ubuntu-latest
     environment: ${{ needs.approve.outputs.attempt != github.run_attempt && !(github.head_ref == 'staging' && github.base_ref == 'master') && 'integration_tests' || '' }}
     timeout-minutes: 45
     strategy:
@@ -111,13 +111,6 @@ jobs:
         name: Restore Iceberg writer jar
         uses: ./.github/actions/iceberg-jar
 
-      - &driver-image
-        name: Build driver image
-        id: image
-        background: true
-        timeout-minutes: 20
-        run: make docker.${{ matrix.driver }}.build DOCKER_BUILD="docker buildx build --progress=plain --cache-from type=gha,scope=olake-base --cache-from type=gha,scope=olake-${{ matrix.driver }} --load"
-
       - &go
         name: Set up Go
         uses: actions/setup-go@v4
@@ -128,6 +121,15 @@ jobs:
       - &go-caches
         name: Restore shared Go caches
         uses: ./.github/actions/go-caches
+
+      # CASE 2: `make docker.<driver>.build` runs `make dist.<driver>` on the runner first, so Go
+      # is set up before it.
+      - &driver-image
+        name: Build driver image
+        id: image
+        background: true
+        timeout-minutes: 20
+        run: make docker.${{ matrix.driver }}.build DOCKER_BUILD="docker buildx build --progress=plain --cache-from type=gha,scope=olake-base --cache-from type=gha,scope=olake-${{ matrix.driver }} --load"
 
       - &test-build
         name: Install Dependencies
@@ -181,7 +183,7 @@ jobs:
     name: Build base branch driver images
     needs: approve
     if: github.event_name == 'pull_request' && needs.approve.outputs.base-image-misses != '' && needs.approve.outputs.base-image-misses != '[]'
-    runs-on: 16gb-runner
+    runs-on: ubuntu-latest
     environment: ${{ needs.approve.outputs.attempt != github.run_attempt && !(github.head_ref == 'staging' && github.base_ref == 'master') && 'integration_tests' || '' }}
     permissions:
       contents: read
@@ -212,7 +214,7 @@ jobs:
     strategy:
       matrix:
         baseline: ${{ fromJSON(github.event_name == 'pull_request' && format('["{0}"]', github.event.pull_request.base.sha) || '[]') }}
-    runs-on: 32gb-runner
+    runs-on: ubuntu-latest
     environment: ${{ needs.approve.outputs.attempt != github.run_attempt && !(github.head_ref == 'staging' && github.base_ref == 'master') && 'integration_tests' || '' }}
     timeout-minutes: 90
     env:
@@ -288,7 +290,7 @@ jobs:
     name: Backward Compatibility with Older Releases
     needs: approve
     if: (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.base_ref == 'master')) && needs.approve.outputs.drivers-with-compatibility-tests != '[]'
-    runs-on: 16gb-runner
+    runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'pull_request' && needs.approve.outputs.attempt != github.run_attempt && !(github.head_ref == 'staging' && github.base_ref == 'master') && 'integration_tests' || '' }}
     timeout-minutes: 90
     strategy:
@@ -302,9 +304,9 @@ jobs:
       - *containers
       - *buildx
       - *jar
-      - *driver-image
       - *go
       - *go-caches
+      - *driver-image
       - *test-build
       - *wait-background
       - *wait-ready

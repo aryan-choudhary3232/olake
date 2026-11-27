@@ -38,6 +38,7 @@ IMAGE_TAG ?= local
 DOCKER_BUILD ?= docker build
 .PHONY: $(addsuffix .build,$(addprefix docker.,$(DRIVERS)))
 $(addsuffix .build,$(addprefix docker.,$(DRIVERS))): docker.%.build:
+	$(MAKE) --no-print-directory dist.$* PLATFORMS=$(or $(call local_driver_platforms,$*),linux/$(shell go env GOHOSTARCH))
 	$(DOCKER_BUILD) $(addprefix --platform ,$(call local_driver_platforms,$*)) \
 		--build-arg DRIVER_NAME=$* $(DOCKER_BUILD_ARGS.$*) \
 		-t olakego/source-$*:$(IMAGE_TAG) .
@@ -376,7 +377,7 @@ $(foreach d,$(DRIVERS),$(eval $(call DEV_BUILD_template,$(d))))
 # PLATFORMS=...) into dist/<driver>/<os>/<arch>/: the `olake` binary, overlay/ with the runtime
 # files prepare.<driver> stages for the image (empty except db2's clidriver) and runtime-packages,
 # its RUNTIME_PACKAGES list (empty except db2). The release workflow runs it on the runner and
-# builds the image with BINARIES=dist, so the image build only copies files and never compiles Go
+# builds the image from it (as does docker.<driver>.build), so the image build only copies files and never compiles Go
 # under emulation. dist/<driver> is emptied first, so a binary from an older build can never end
 # up in an image.
 comma := ,
