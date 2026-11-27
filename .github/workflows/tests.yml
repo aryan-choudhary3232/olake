@@ -1,4 +1,5 @@
 name: Tests
+# CASE 1 test PR: this comment only makes the Tests workflow run on it (path filter).
 
 on:
   workflow_dispatch:
