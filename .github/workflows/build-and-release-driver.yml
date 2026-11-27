@@ -29,8 +29,9 @@ env:
   VERSION: ${{ inputs.version || github.event.inputs.version || 'v0.0.0.dev' }}
 
 jobs:
-  # CASE 1 (source): validates the version and builds the Iceberg writer jar. The Go binaries are
-  # compiled inside Docker by each push job (BINARIES=source), on a runner of the target arch.
+  # Validates the driver and version and builds the Iceberg writer jar. No Docker Hub credentials
+  # here: the build runs third-party code (Maven plugins). The Go binaries are compiled inside
+  # Docker by each push job, where commands cannot read the runner's secrets.
   build:
     name: Build ${{ inputs.driver }} jar
     runs-on: ubuntu-latest
@@ -111,24 +112,19 @@ jobs:
       - name: Build the Iceberg writer jar
         run: make iceberg.jar
 
-      # A tarball keeps the exec bits and the clidriver's symlinks, which an artifact drops.
-      - name: Package build output
-        run: |
-          tar -cf "$RUNNER_TEMP/release.tar" \
-            destination/iceberg/olake-iceberg-java-writer/target/olake-iceberg-java-writer-0.0.1-SNAPSHOT.jar
-
-      - name: Upload build output
+      - name: Upload the Iceberg writer jar
         uses: actions/upload-artifact@v7
         with:
           name: release-${{ env.DRIVER }}
-          path: ${{ runner.temp }}/release.tar
+          path: destination/iceberg/olake-iceberg-java-writer/target/olake-iceberg-java-writer-0.0.1-SNAPSHOT.jar
           if-no-files-found: error
           retention-days: 1
           # A re-run of this job uploads under the same name.
           overwrite: true
 
-  # Packages the prebuilt files into one image per platform, each on a runner of that arch, so
-  # nothing runs under QEMU. Smoke tests the image, then pushes it by digest; `merge` tags them.
+  # Builds one image per platform, each on a runner of that arch, so nothing runs under QEMU: Go
+  # compiles inside Docker (as in `make docker.<driver>.build`) natively. Smoke tests the image,
+  # then pushes it by digest; `merge` tags them.
   push:
     name: Push ${{ inputs.driver }} image (${{ matrix.platform }})
     needs: build
@@ -144,34 +140,30 @@ jobs:
       # Keeps the build summary but not its .dockerbuild record artifact (two per job otherwise).
       DOCKER_BUILD_RECORD_UPLOAD: false
     steps:
-      # The image build only reads these from the repo; the rest comes from the build job.
       - name: Checkout code
         uses: actions/checkout@v7
         with:
           ref: ${{ needs.build.outputs.sha }}
           persist-credentials: false
 
-      - name: Download build output
+      - name: Download the Iceberg writer jar
         uses: actions/download-artifact@v8
         with:
           name: release-${{ env.DRIVER }}
-          path: ${{ runner.temp }}
-
-      - name: Unpack build output
-        run: tar -xf "$RUNNER_TEMP/release.tar"
+          path: destination/iceberg/olake-iceberg-java-writer/target
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # context: . builds the checkout plus the unpacked dist/ and jar; the action's default (the
-      # Git context) would fetch the repo again and miss them.
+      # context: . builds the checkout plus the downloaded jar; the action's default (the Git
+      # context) would fetch the repo again and miss it. On a native runner go-cross and go-target
+      # are the same platform, so db2 needs no GO_BUILD=target here.
       - name: Build image
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ env.PLATFORM }}
           build-args: &build-args |
-            BINARIES=source
             DRIVER_NAME=${{ env.DRIVER }}
             DRIVER_VERSION=${{ env.VERSION }}
           load: true
