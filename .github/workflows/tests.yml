@@ -69,7 +69,7 @@ jobs:
     name: Integration Test ${{ matrix.name }}
     needs: approve
     if: github.event_name == 'pull_request'
-    runs-on: 16gb-runner
+    runs-on: ubuntu-latest
     environment: ${{ needs.approve.outputs.attempt != github.run_attempt && !(github.head_ref == 'staging' && github.base_ref == 'master') && 'integration_tests' || '' }}
     timeout-minutes: 45
     strategy:
@@ -181,7 +181,7 @@ jobs:
     name: Build base branch driver images
     needs: approve
     if: github.event_name == 'pull_request' && needs.approve.outputs.base-image-misses != '' && needs.approve.outputs.base-image-misses != '[]'
-    runs-on: 16gb-runner
+    runs-on: ubuntu-latest
     environment: ${{ needs.approve.outputs.attempt != github.run_attempt && !(github.head_ref == 'staging' && github.base_ref == 'master') && 'integration_tests' || '' }}
     permissions:
       contents: read
@@ -212,7 +212,7 @@ jobs:
     strategy:
       matrix:
         baseline: ${{ fromJSON(github.event_name == 'pull_request' && format('["{0}"]', github.event.pull_request.base.sha) || '[]') }}
-    runs-on: 32gb-runner
+    runs-on: ubuntu-latest
     environment: ${{ needs.approve.outputs.attempt != github.run_attempt && !(github.head_ref == 'staging' && github.base_ref == 'master') && 'integration_tests' || '' }}
     timeout-minutes: 90
     env:
@@ -288,7 +288,7 @@ jobs:
     name: Backward Compatibility with Older Releases
     needs: approve
     if: (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.base_ref == 'master')) && needs.approve.outputs.drivers-with-compatibility-tests != '[]'
-    runs-on: 16gb-runner
+    runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'pull_request' && needs.approve.outputs.attempt != github.run_attempt && !(github.head_ref == 'staging' && github.base_ref == 'master') && 'integration_tests' || '' }}
     timeout-minutes: 90
     strategy:

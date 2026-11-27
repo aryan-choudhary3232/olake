@@ -22,22 +22,48 @@ on:
         default: ""
 
 jobs:
+  # CASE 1: the upstream flow (release-tool.sh, Go compiles inside Docker), with QEMU removed:
+  # each platform builds on a runner of its own arch, and `merge` joins them into one tag.
+  plan:
+    name: Plan ${{ inputs.driver || github.event.inputs.driver }}
+    runs-on: ubuntu-latest
+    outputs:
+      platforms: ${{ steps.platforms.outputs.platforms }}
+    env:
+      DRIVER: ${{ inputs.driver || github.event.inputs.driver || 'mongodb' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Resolve platforms
+        id: platforms
+        run: echo "platforms=$(make -s "print.platforms.$DRIVER" | jq -Rc 'split(",")')" >> "$GITHUB_OUTPUT"
+
   publish_drivers:
-    name: Publish driver ${{ github.event.inputs.driver }} [manual]
+    name: Publish driver ${{ inputs.driver || github.event.inputs.driver }} (${{ matrix.platform }})
+    needs: plan
     environment: Publish Driver
-    runs-on: 32gb-runner
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      matrix:
+        platform: ${{ fromJSON(needs.plan.outputs.platforms) }}
     env:
       DOCKER_LOGIN: ${{ secrets.DOCKER_USERNAME }}
       DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
       DHID: ${{ secrets.DOCKER_REPO || 'olakego' }}
       DRIVER: ${{ inputs.driver || github.event.inputs.driver || 'mongodb' }}
       VERSION: ${{ inputs.version || github.event.inputs.version || 'v0.0.0.dev' }}
+      PLATFORMS: ${{ matrix.platform }}
+      TAG_SUFFIX: -${{ matrix.platform == 'linux/arm64' && 'arm64' || 'amd64' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -46,14 +72,55 @@ jobs:
           distribution: "temurin"
           cache: maven
 
+      # release-tool.sh calls mvn; make sure the arm64 runner image has it too.
+      - name: Ensure Maven
+        run: command -v mvn || { sudo apt-get update -qq && sudo apt-get install -y -qq maven; }
+
       - name: Set Driver
         run: echo "DRIVER=${{ env.DRIVER }}" >> $GITHUB_ENV
       - name: Set VERSION
         run: echo "VERSION=${{ env.VERSION }}" >> $GITHUB_ENV
       - name: Show VERSION
-        run: echo "Building driver $DRIVER with version $VERSION"
+        run: echo "Building driver $DRIVER with version $VERSION for $PLATFORMS"
       - name: Run Release tool
         run: |
           chmod +x ./release-tool.sh
           ./release-tool.sh
         shell: bash
+
+  # Joins the per-arch tags release-tool.sh pushed into the multi-arch tags (same branch rules).
+  merge:
+    name: Publish driver ${{ inputs.driver || github.event.inputs.driver }} (multi-arch)
+    needs: [plan, publish_drivers]
+    environment: Publish Driver
+    runs-on: ubuntu-latest
+    env:
+      DHID: ${{ secrets.DOCKER_REPO || 'olakego' }}
+      DRIVER: ${{ inputs.driver || github.event.inputs.driver || 'mongodb' }}
+      VERSION: ${{ inputs.version || github.event.inputs.version || 'v0.0.0.dev' }}
+      PLATFORMS: ${{ join(fromJSON(needs.plan.outputs.platforms), ' ') }}
+      BRANCH: ${{ github.ref_name }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Create the multi-arch tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="$DHID/source-$DRIVER"
+          case "$BRANCH" in
+            master)  tag_version="$VERSION";      latest_tag="latest" ;;
+            staging) tag_version="stag-$VERSION"; latest_tag="stag-latest" ;;
+            *)       tag_version="dev-$VERSION";  latest_tag="dev-latest" ;;
+          esac
+          refs=()
+          for p in $PLATFORMS; do refs+=("$image:$tag_version-${p#linux/}"); done
+          docker buildx imagetools create -t "$image:$tag_version" -t "$image:$latest_tag" "${refs[@]}"
+          docker buildx imagetools inspect "$image:$tag_version"

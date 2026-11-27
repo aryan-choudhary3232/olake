@@ -73,6 +73,11 @@ function release() {
         latest_tag="stag-latest"
     fi
 
+    # One job per platform (native runner, no QEMU): each pushes <tag>-<arch>, and the workflow's
+    # merge job joins them into the multi-arch tags.
+    tag_version="${tag_version}${TAG_SUFFIX:-}"
+    latest_tag="${latest_tag}${TAG_SUFFIX:-}"
+
     echo "Logging into Docker..."
     docker login -u="$DOCKER_LOGIN" -p="$DOCKER_PASSWORD" || fail "Docker login failed for $DOCKER_LOGIN"
     echo "**** Releasing $image_name for platforms [$platform] with version [$tag_version] ****"
