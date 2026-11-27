@@ -29,12 +29,11 @@ env:
   VERSION: ${{ inputs.version || github.event.inputs.version || 'v0.0.0.dev' }}
 
 jobs:
-  # Builds the driver binaries for every platform (`make dist.<driver>`) and the Iceberg writer
-  # jar on the runner. No Docker Hub credentials here: the build runs third-party code (Go
-  # modules, Maven plugins).
+  # CASE 1 (source): validates the version and builds the Iceberg writer jar. The Go binaries are
+  # compiled inside Docker by each push job (BINARIES=source), on a runner of the target arch.
   build:
-    name: Build ${{ inputs.driver }} binaries
-    runs-on: 32gb-runner
+    name: Build ${{ inputs.driver }} jar
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
       sha: ${{ steps.ref.outputs.sha }}
@@ -109,13 +108,13 @@ jobs:
           java-version: "17"
           distribution: "temurin"
 
-      - name: Build binaries and the Iceberg writer jar
-        run: make -j2 --output-sync=target iceberg.jar "dist.$DRIVER"
+      - name: Build the Iceberg writer jar
+        run: make iceberg.jar
 
       # A tarball keeps the exec bits and the clidriver's symlinks, which an artifact drops.
       - name: Package build output
         run: |
-          tar -cf "$RUNNER_TEMP/release.tar" "dist/$DRIVER" \
+          tar -cf "$RUNNER_TEMP/release.tar" \
             destination/iceberg/olake-iceberg-java-writer/target/olake-iceberg-java-writer-0.0.1-SNAPSHOT.jar
 
       - name: Upload build output
@@ -151,12 +150,6 @@ jobs:
         with:
           ref: ${{ needs.build.outputs.sha }}
           persist-credentials: false
-          sparse-checkout: |
-            /Dockerfile
-            /.dockerignore
-            /drivers/*/resources/spec.json
-            /destination/*/resources/spec.json
-          sparse-checkout-cone-mode: false
 
       - name: Download build output
         uses: actions/download-artifact@v8
@@ -178,7 +171,7 @@ jobs:
           context: .
           platforms: ${{ env.PLATFORM }}
           build-args: &build-args |
-            BINARIES=dist
+            BINARIES=source
             DRIVER_NAME=${{ env.DRIVER }}
             DRIVER_VERSION=${{ env.VERSION }}
           load: true
